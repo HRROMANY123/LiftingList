@@ -593,6 +593,7 @@ if gen:
         f"BEST 13 TAGS (<=20 chars each):\n{', '.join(best_tags)}\n\n"
         f"DESCRIPTION:\n{desc}"
     )
+    txt_bytes = copy_payload.encode("utf-8")
     cA1, cA2, cA3 = st.columns([4, 4, 4])
     with cA1:
         copy_button(best_title, key="copy_best_title", label="Copy Best Title")
@@ -665,23 +666,34 @@ if gen:
 
     csv_bytes = csv_buffer.getvalue().encode("utf-8-sig")  # Excel-friendly
 
-    d1, d2 = st.columns(2)
-    with d1:
-        st.download_button(
-            label="⬇️ Download JSON",
-            data=json_bytes,
-            file_name="etsy_seo_pack.json",
-            mime="application/json",
-            use_container_width=True
-        )
-    with d2:
-        st.download_button(
-            label="⬇️ Download CSV",
-            data=csv_bytes,
-            file_name="etsy_seo_pack.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+   d1, d2, d3 = st.columns(3)
+
+with d1:
+    st.download_button(
+        label="⬇️ Download JSON",
+        data=json_bytes,
+        file_name="etsy_seo_pack.json",
+        mime="application/json",
+        use_container_width=True
+    )
+
+with d2:
+    st.download_button(
+        label="⬇️ Download CSV",
+        data=csv_bytes,
+        file_name="etsy_seo_pack.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
+with d3:
+    st.download_button(
+        label="⬇️ Download TXT",
+        data=txt_bytes,
+        file_name="etsy_seo_pack.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
     # =========================
     # Titles (Ranked)
     # =========================
