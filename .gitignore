@@ -5,3 +5,5 @@ __pycache__/
 *.pyd
 .env
 API KEY.txt
+pro_users.json
+usage.json
