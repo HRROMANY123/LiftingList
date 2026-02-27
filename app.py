@@ -1,426 +1,499 @@
 import streamlit as st
-import pandas as pd
-import re
 import json
-import hashlib
+import re
 from datetime import datetime, date
+from pathlib import Path
+import streamlit.components.v1 as components
 
-# ----------------- CONFIG -----------------
-APP_NAME = "Etsy SEO Helper"
-FREE_DAILY_LIMIT = 3
-USAGE_FILE = "usage.json"
+# =========================
+# CONFIG
+# =========================
+APP_TITLE = "Etsy SEO Helper (Templates Pro)"
 PRO_USERS_FILE = "pro_users.json"
+USAGE_FILE = "usage_log.json"       # tracks free users daily usage by email
+FREE_DAILY_LIMIT = 5               # free generations per day per email
+MAX_TITLE_LEN = 140
 
-st.set_page_config(page_title=APP_NAME, page_icon="🧠", layout="centered")
+# =========================
+# UTIL: JSON helpers
+# =========================
+def _read_json(path: str, default):
+    p = Path(path)
+    if not p.exists():
+        return default
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return default
 
-# ----------------- HELPERS -----------------
-def clean_text(s: str) -> str:
+def _write_json(path: str, data):
+    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def load_pro_users():
+    data = _read_json(PRO_USERS_FILE, default={})
+    # supports {"emails": ["a@b.com"]} OR {"a@b.com": true}
+    if isinstance(data, dict) and "emails" in data and isinstance(data["emails"], list):
+        return set([e.strip().lower() for e in data["emails"] if isinstance(e, str)])
+    if isinstance(data, dict):
+        return set([k.strip().lower() for k, v in data.items() if v is True or v == 1])
+    if isinstance(data, list):
+        return set([e.strip().lower() for e in data if isinstance(e, str)])
+    return set()
+
+def is_valid_email(email: str) -> bool:
+    if not email:
+        return False
+    email = email.strip().lower()
+    return re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email) is not None
+
+def load_usage():
+    return _read_json(USAGE_FILE, default={})
+
+def save_usage(usage: dict):
+    _write_json(USAGE_FILE, usage)
+
+def today_key():
+    return date.today().isoformat()
+
+def get_free_used(usage: dict, email: str) -> int:
+    email = (email or "").strip().lower()
+    return int(usage.get(today_key(), {}).get(email, 0))
+
+def inc_free_used(usage: dict, email: str):
+    email = email.strip().lower()
+    tk = today_key()
+    usage.setdefault(tk, {})
+    usage[tk][email] = int(usage[tk].get(email, 0)) + 1
+
+# =========================
+# UTIL: Copy button (JS)
+# =========================
+def copy_button(text: str, key: str, label="Copy"):
+    # A tiny HTML+JS snippet using Clipboard API
+    safe_text = text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+    html = f"""
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button
+        style="
+          border:1px solid #ddd; background:#fff; padding:6px 10px; border-radius:8px;
+          cursor:pointer; font-size:14px;
+        "
+        onclick="navigator.clipboard.writeText(`{safe_text}`); this.innerText='Copied ✅'; setTimeout(()=>this.innerText='{label}', 1200);"
+        id="{key}">
+        {label}
+      </button>
+    </div>
+    """
+    components.html(html, height=44)
+
+# =========================
+# SEO Template Logic (No AI)
+# =========================
+BUYER_INTENT_WORDS = [
+    "gift", "personalized", "custom", "handmade", "unique", "premium",
+    "best gift", "for her", "for him", "for kids", "anniversary", "birthday",
+    "wedding", "bridal", "housewarming", "christmas gift", "mothers day", "fathers day"
+]
+
+SEASONAL_PACKS = {
+    "None": [],
+    "Spring": ["spring", "easter", "mother's day"],
+    "Summer": ["summer", "beach", "vacation"],
+    "Autumn": ["fall", "autumn", "halloween", "thanksgiving"],
+    "Winter": ["winter", "christmas", "new year"],
+}
+
+def clean_kw(s: str):
     s = (s or "").strip()
     s = re.sub(r"\s+", " ", s)
     return s
 
-def slugify(s: str) -> str:
-    s = clean_text(s).lower()
-    s = re.sub(r"[^a-z0-9\s-]", "", s)
-    s = re.sub(r"\s+", "-", s).strip("-")
-    return s[:60] if s else "item"
+def split_keywords(s: str):
+    # split by commas
+    parts = [clean_kw(x) for x in (s or "").split(",")]
+    parts = [p for p in parts if p]
+    return parts
 
-def sha256_short(s: str) -> str:
-    return hashlib.sha256((s or "").encode("utf-8")).hexdigest()[:16]
+def title_variations(product: str, main_kws: list, material: str, style: str, audience: str,
+                     occasion: str, personalization: str, color: str, season: str):
+    product = clean_kw(product)
+    material = clean_kw(material)
+    style = clean_kw(style)
+    audience = clean_kw(audience)
+    occasion = clean_kw(occasion)
+    personalization = clean_kw(personalization)
+    color = clean_kw(color)
 
-def today_key() -> str:
-    return str(date.today())
+    # pick 2–3 strong keywords
+    kws = [k for k in main_kws if k]
+    top = kws[:3] if len(kws) >= 3 else kws
 
-def split_list(raw: str, max_items: int = 12):
-    items = []
-    for x in re.split(r"[\n,]+", raw or ""):
-        t = clean_text(x)
-        if t:
-            items.append(t)
-    out = []
-    seen = set()
-    for i in items:
-        k = i.lower()
-        if k not in seen:
-            out.append(i)
-            seen.add(k)
-    return out[:max_items]
+    seasonal = SEASONAL_PACKS.get(season, [])
+    season_kw = seasonal[0] if seasonal else ""
 
-# ----------------- JSON STORE -----------------
-def load_json_file(path: str, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-def save_json_file(path: str, obj):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-# ----------------- USAGE -----------------
-def get_user_id(email: str) -> str:
-    email = clean_text(email).lower()
-    return sha256_short(email)
-
-def get_usage_today(user_id: str) -> int:
-    usage = load_json_file(USAGE_FILE, {})
-    if not isinstance(usage, dict):
-        # self-heal if corrupted
-        usage = {}
-        save_json_file(USAGE_FILE, usage)
-    return int(usage.get(user_id, {}).get(today_key(), 0))
-
-def inc_usage_today(user_id: str):
-    usage = load_json_file(USAGE_FILE, {})
-    if not isinstance(usage, dict):
-        usage = {}
-    usage.setdefault(user_id, {})
-    usage[user_id].setdefault(today_key(), 0)
-    usage[user_id][today_key()] += 1
-    save_json_file(USAGE_FILE, usage)
-
-# ----------------- PRO USERS (BY EMAIL) -----------------
-def load_pro_users() -> set:
-    """
-    pro_users.json should be a JSON list of emails:
-    ["buyer@email.com", "another@domain.com"]
-    """
-    data = load_json_file(PRO_USERS_FILE, [])
-    if isinstance(data, list):
-        return set([clean_text(x).lower() for x in data if clean_text(x)])
-    return set()
-
-def is_pro_user(email: str) -> bool:
-    email = clean_text(email).lower()
-    if not email:
-        return False
-    return email in load_pro_users()
-
-# ----------------- SEO GENERATION (TEMPLATES) -----------------
-def extract_keywords(product, niche, style, occasion, file_type, features, audience):
-    seed = " ".join([product, niche, style, occasion, file_type, audience] + features)
-    words = re.findall(r"[a-z0-9]+", seed.lower())
-    stop = set("""
-        the a an and or for with to in of on at by from is are this that
-        best premium high quality durable easy new
-        digital instant download printable template templates
-    """.split())
-    uniq = []
-    for w in words:
-        if len(w) < 3 or w in stop:
-            continue
-        if w not in uniq:
-            uniq.append(w)
-    return uniq[:60]
-
-def build_titles(product, primary_kw, niche, occasion, style, file_type, size, keywords):
-    kw = clean_text(primary_kw or (keywords[0] if keywords else product))
-    patterns = [
-        "{kw} | {product} | {niche} | {occasion}",
-        "{kw} {product} - {style} {file_type} ({size})",
-        "{product} {kw} | {occasion} | Instant Download",
-        "{kw} {product} | {niche} | {style}",
-        "{product} | {niche} | {kw} | {occasion}",
-        "{kw} {product} | {file_type} | Editable Template",
-        "{product} {kw} | {style} | {niche}",
-        "{kw} | {product} | {file_type} | {occasion}",
-        "{product} | {kw} | {style} | Instant Download",
-        "{kw} {product} | {niche} | {occasion} | {size}",
+    # templates
+    templates = [
+        "{kw1} {product} - {material} {style} | {audience} {occasion}",
+        "{product} {kw1} {kw2} | {personalization} {audience} Gift",
+        "{kw1} {kw2} {product} | {color} {style} - Perfect {occasion}",
+        "{season} {kw1} {product} | Unique {audience} Gift - {material}",
+        "{product} | {kw1} {style} {material} - {occasion} Gift Idea",
+        "{kw1} {product} | {personalization} - {audience} {occasion} Gift",
+        "{kw1} {kw2} {product} | Handmade {style} - {audience}",
+        "{product} {kw1} | Premium {material} - {color} {occasion}",
     ]
-    variants = []
-    for p in patterns:
-        title = p.format(
-            kw=kw,
-            product=clean_text(product),
-            niche=clean_text(niche),
-            occasion=clean_text(occasion),
-            style=clean_text(style),
-            file_type=clean_text(file_type),
-            size=clean_text(size),
-        )
-        title = clean_text(title).strip(" |-_")
-        title = title[:140]
-        if title and title.lower() not in [v.lower() for v in variants]:
-            variants.append(title)
-    return variants[:10]
 
-def build_tags(keywords):
-    tags = []
-    for k in keywords:
-        if len(tags) >= 13:
-            break
-        t = k.replace("_", " ").strip()
-        if 2 <= len(t) <= 20 and t not in tags:
-            tags.append(t)
+    # safe kw slots
+    kw1 = top[0] if len(top) > 0 else ""
+    kw2 = top[1] if len(top) > 1 else ""
+    kw3 = top[2] if len(top) > 2 else ""
 
-    fillers = ["instant download", "digital file", "printable", "editable template", "gift idea"]
-    for f in fillers:
-        if len(tags) >= 13:
-            break
-        if len(f) <= 20 and f not in tags:
-            tags.append(f)
-
-    while len(tags) < 13:
-        tags.append("digital download")
-
-    return tags[:13]
-
-def build_description(product, file_type, size, includes, how_to, features, niche, audience, style, occasion, tone):
-    tone_map = {
-        "Professional": {
-            "intro": "A clear, SEO-friendly description designed to convert browsers into buyers.",
-            "voice": "Clear, informative, and to-the-point."
-        },
-        "Friendly": {
-            "intro": "A warm, buyer-friendly description that highlights benefits and makes purchasing easy.",
-            "voice": "Friendly, helpful, and human."
-        },
-        "Luxury": {
-            "intro": "A premium description with elevated language and a polished feel.",
-            "voice": "Elegant, confident, and refined."
-        }
-    }
-    t = tone_map.get(tone, tone_map["Professional"])
-
-    feat_lines = "\n".join([f"• {x}" for x in features[:8]]) if features else "• High-quality design\n• Easy to use\n• Instant access"
-    inc_lines = "\n".join([f"• {x}" for x in includes[:10]]) if includes else "• 1 x PDF file\n• 1 x PNG file (optional)\n• Instructions"
-
-    return f"""**{product}** — {file_type} ({size or "N/A"})
-
-{t['intro']}
-
-**Style:** {style or "N/A"}  
-**Occasion:** {occasion or "N/A"}  
-**Best for:** {audience or "Etsy buyers"}
-
----
-
-### ✅ What you’ll get
-{inc_lines}
-
-### ⭐ Key features
-{feat_lines}
-
-### 📌 Perfect for
-• {niche or "digital downloads"}  
-• {occasion or "gifting"}  
-• {audience or "personal use / small business"}
-
-### ⬇️ How it works (Instant Download)
-{how_to}
-
-### ⚠️ Notes
-• This is a **digital product** — no physical item will be shipped.  
-• Colors may vary slightly due to different screens/printers.  
-• Usage rights depend on your shop policy.
-
-**Tone:** {t['voice']}
-"""
-
-# ----------------- UI -----------------
-st.markdown(f"## 🧠 {APP_NAME}")
-st.caption("Generate Etsy-optimized titles, 13 tags, and a high-converting description — focused on digital downloads.")
-
-tabs = st.tabs(["Generate", "Examples", "Pricing", "FAQ"])
-
-# -------- Sidebar: access --------
-with st.sidebar:
-    st.header("Access")
-    email = st.text_input("Email (used for limits & Pro)", placeholder="you@email.com")
-    email_clean = clean_text(email).lower()
-
-    pro = is_pro_user(email_clean) if email_clean else False
-
-    if email_clean:
-        uid = get_user_id(email_clean)
-        used = get_usage_today(uid)
-        if pro:
-            st.success("Pro active ✅ (by email)")
-            st.write(f"Today usage: {used} (unlimited)")
-        else:
-            st.info(f"Free plan: {FREE_DAILY_LIMIT}/day")
-            st.write(f"Today used: {used}/{FREE_DAILY_LIMIT}")
-            st.markdown("**Upgrade to Pro:** buy on Gumroad, then use the same email here.")
-    else:
-        st.warning("Enter your email to generate listings.")
-
-# -------- Generate Tab --------
-with tabs[0]:
-    st.subheader("Product details")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        product = st.text_input("Product name (required)", placeholder="e.g., Minimalist Wedding Invitation Template")
-        primary_kw = st.text_input("Primary keyword (SEO)", placeholder="e.g., wedding invitation template")
-        niche = st.text_input("Niche / category", placeholder="e.g., wedding, planner, business, baby shower")
-        file_type = st.selectbox(
-            "Digital file type",
-            ["Canva Template", "Printable PDF", "Editable Templett", "SVG/PNG Bundle", "Planner/Journal", "Resume Template", "Other"],
-            index=0
-        )
-
-    with col2:
-        style = st.text_input("Style", placeholder="e.g., minimalist, boho, modern, vintage")
-        occasion = st.text_input("Occasion", placeholder="e.g., wedding, birthday, baby shower")
-        size = st.text_input("Size / format", placeholder="e.g., 5x7, A4, US Letter")
-        tone = st.selectbox("Tone", ["Professional", "Friendly", "Luxury"], index=0)
-
-    st.subheader("Features (paste bullet points)")
-    features = split_list(
-        st.text_area("Top features", height=110, placeholder="e.g.\nEditable in Canva\nInstant download\nHigh-resolution print\nEasy to customize"),
-        max_items=12
-    )
-
-    st.subheader("What’s included (files)")
-    includes = split_list(
-        st.text_area("Included files", height=90, placeholder="e.g.\n1 Canva template link\n1 PDF (A4)\n1 PDF (US Letter)\nInstructions PDF"),
-        max_items=12
-    )
-
-    st.subheader("Instant download instructions")
-    how_to = st.text_area(
-        "How to download/use",
-        height=90,
-        value="After purchase, go to Etsy → Your Account → Purchases → Download files. Open the PDF or Canva link and edit/print as needed."
-    )
-
-    audience = st.text_input("Target buyer (optional)", placeholder="e.g., brides, small business owners, teachers")
-
-    generate_btn = st.button("✨ Generate Etsy Listing", type="primary")
-
-    if generate_btn:
-        if not email_clean:
-            st.error("Please enter your email in the sidebar first.")
-            st.stop()
-
-        uid = get_user_id(email_clean)
-        used = get_usage_today(uid)
-
-        if (not pro) and used >= FREE_DAILY_LIMIT:
-            st.warning("Free limit reached for today. Upgrade to Pro (by email) for unlimited generations.")
-            st.stop()
-
-        if not clean_text(product):
-            st.error("Product name is required.")
-            st.stop()
-
-        inc_usage_today(uid)
-
-        keywords = extract_keywords(product, niche, style, occasion, file_type, features, audience)
-        titles = build_titles(product, primary_kw, niche, occasion, style, file_type, size, keywords)
-        tags = build_tags(keywords)
-        description = build_description(
+    def fill(t):
+        out = t.format(
+            kw1=kw1, kw2=kw2, kw3=kw3,
             product=product,
-            file_type=file_type,
-            size=size,
-            includes=includes,
-            how_to=how_to,
-            features=features,
-            niche=niche,
-            audience=audience,
+            material=material,
             style=style,
+            audience=audience,
             occasion=occasion,
-            tone=tone
+            personalization=personalization,
+            color=color,
+            season=season_kw
         )
+        # cleanup double spaces, stray separators
+        out = re.sub(r"\s+", " ", out).strip()
+        out = re.sub(r"\|\s*\|", "|", out)
+        out = re.sub(r"\s+\|", " |", out)
+        out = re.sub(r"\|\s+", "| ", out)
+        out = out.strip(" -|")
+        return out
 
-        st.success("Generated ✅")
+    titles = []
+    for t in templates:
+        cand = fill(t)
+        if cand and cand not in titles:
+            titles.append(cand)
 
-        st.subheader("✅ Titles (10 options)")
-        for i, t in enumerate(titles, 1):
-            st.write(f"{i}. {t}")
+    # ensure max 8, prioritize unique
+    return titles[:8]
 
-        st.subheader("🏷️ Tags (13)")
-        st.code(", ".join(tags))
+def make_long_tail_tags(product: str, main_kws: list, material: str, style: str, audience: str, occasion: str, season: str):
+    product = clean_kw(product)
+    material = clean_kw(material)
+    style = clean_kw(style)
+    audience = clean_kw(audience)
+    occasion = clean_kw(occasion)
+    seasonal = SEASONAL_PACKS.get(season, [])
 
-        st.subheader("📝 Description")
-        st.markdown(description)
+    kws = [k for k in main_kws if k]
+    # Build long-tail phrases (3–5 words)
+    candidates = []
+    base_parts = [style, material, product]
+    base = " ".join([p for p in base_parts if p]).strip()
 
-        st.subheader("🔎 Keyword ideas")
-        st.write(", ".join(keywords[:25]))
+    if kws:
+        candidates.append(f"{kws[0]} {base}".strip())
+    if len(kws) > 1:
+        candidates.append(f"{kws[0]} {kws[1]} {product}".strip())
+    if audience:
+        candidates.append(f"{base} for {audience}".strip())
+    if occasion:
+        candidates.append(f"{occasion} {product} {style}".strip())
+    if seasonal:
+        candidates.append(f"{seasonal[0]} {product} gift".strip())
 
-        out = {
-            "email": email_clean,
-            "plan": "pro" if pro else "free",
-            "product": product,
-            "primary_keyword": primary_kw,
-            "niche": niche,
-            "file_type": file_type,
-            "style": style,
-            "occasion": occasion,
-            "size": size,
-            "tone": tone,
-            "titles": " | ".join(titles),
-            "tags": ", ".join(tags),
-            "keywords": ", ".join(keywords[:25]),
-            "generated_at": datetime.utcnow().isoformat()
-        }
-        df = pd.DataFrame([out])
+    # Clean, unique, <= 20 chars? Etsy tags often 20 chars max,
+    # but user asked improvements not strict enforcement. We'll keep reasonable length.
+    out = []
+    for c in candidates:
+        c = re.sub(r"\s+", " ", c).strip().lower()
+        if c and c not in out:
+            out.append(c)
+    return out[:13]
 
-        st.subheader("⬇️ Export")
-        st.dataframe(df, use_container_width=True)
-        st.download_button(
-            "Download CSV",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name=f"etsy_listing_{slugify(product)}.csv",
-            mime="text/csv"
-        )
+def make_buyer_intent_tags(audience: str, occasion: str):
+    audience = clean_kw(audience).lower()
+    occasion = clean_kw(occasion).lower()
 
-# -------- Examples Tab --------
-with tabs[1]:
-    st.subheader("Examples (what outputs look like)")
-    st.markdown("""
-**Example input**  
-Product: Minimalist Wedding Invitation Template  
-Primary keyword: wedding invitation template  
-Style: minimalist  
-Occasion: wedding  
-File type: Canva Template  
-Size: 5x7 + A4 + US Letter  
-Features: editable, instant download, high-resolution, easy to customize  
+    tags = []
+    # pick a curated subset
+    base = ["gift", "personalized", "custom", "handmade", "unique"]
+    tags.extend(base)
 
-**Example output**  
-- 10 title variations  
-- 13 tags (kept short)  
-- Description with: what's included, features, download instructions, notes
-""")
+    if audience:
+        tags.append(f"for {audience}".strip())
+    if occasion:
+        tags.append(f"{occasion} gift".strip())
 
-# -------- Pricing Tab --------
-with tabs[2]:
-    st.subheader("Pricing")
-    st.markdown(f"""
-**Free**  
-- {FREE_DAILY_LIMIT} generations / day  
-- Titles + Tags + Description  
-- CSV export
+    # ensure unique, lowercase
+    out = []
+    for t in tags:
+        t = re.sub(r"\s+", " ", t).strip().lower()
+        if t and t not in out:
+            out.append(t)
+    return out[:13]
 
-**Pro (via email)**  
-- Unlimited generations  
-- Priority improvements  
-- Bulk mode (coming soon)
+def make_seasonality_tags(season: str):
+    seasonal = SEASONAL_PACKS.get(season, [])
+    out = []
+    for s in seasonal:
+        s = clean_kw(s).lower()
+        if s and s not in out:
+            out.append(s)
+    return out[:13]
 
-**How Pro works right now:**  
-1) Buy Pro on Gumroad  
-2) Use the same purchase email in the app  
-3) We activate Pro by adding your email to the Pro list
-""")
+def strong_first_two_lines(product: str, main_kws: list, benefit: str, audience: str, occasion: str, personalization: str, season: str):
+    product = clean_kw(product)
+    benefit = clean_kw(benefit)
+    audience = clean_kw(audience)
+    occasion = clean_kw(occasion)
+    personalization = clean_kw(personalization)
 
-# -------- FAQ Tab --------
-with tabs[3]:
-    st.subheader("FAQ")
-    st.markdown("""
-**Does this work for US & Europe?**  
-Yes. Etsy SEO is broadly similar across regions, and digital listings are global.
+    kws = [k for k in main_kws if k]
+    kw = kws[0] if kws else ""
 
-**Is this AI?**  
-This MVP uses professional SEO templates and rules. Once billing works, we’ll upgrade generation with a real AI model for higher quality.
+    seasonal = SEASONAL_PACKS.get(season, [])
+    season_kw = seasonal[0] if seasonal else ""
 
-**Will this guarantee sales?**  
-No tool can guarantee sales, but better titles/tags/descriptions improve discoverability and conversion odds.
+    # 2 lines optimized for Etsy search preview
+    line1 = f"{product}: {benefit}" if benefit else f"{product}: {kw} designed to stand out" if kw else f"{product}: made to stand out"
+    # add reason + audience + occasion + personalization
+    parts = []
+    if audience:
+        parts.append(f"Perfect for {audience}")
+    if occasion:
+        parts.append(f"{occasion} gifts")
+    if personalization:
+        parts.append(personalization)
+    if season_kw:
+        parts.append(season_kw)
 
-**How do I get Pro?**  
-Buy on Gumroad, then use the same email in the app. We activate Pro by adding your email to the Pro list.
-""")
+    line2 = " • ".join(parts) if parts else "A thoughtful gift that feels premium and personal."
+
+    # clean
+    line1 = re.sub(r"\s+", " ", line1).strip()
+    line2 = re.sub(r"\s+", " ", line2).strip()
+    return line1, line2
+
+def full_description(product: str, main_kws: list, benefit: str, features: str, materials: str,
+                     sizing: str, shipping: str, personalization: str, audience: str, occasion: str, season: str):
+    l1, l2 = strong_first_two_lines(product, main_kws, benefit, audience, occasion, personalization, season)
+
+    # body template
+    bullets = [clean_kw(x) for x in (features or "").split("\n") if clean_kw(x)]
+    bullets = bullets[:8]
+
+    kws_line = ", ".join([k for k in main_kws[:8] if k])
+    desc = []
+    desc.append(l1)
+    desc.append(l2)
+    desc.append("")
+    desc.append("✅ Why you'll love it:")
+    if bullets:
+        for b in bullets:
+            desc.append(f"• {b}")
+    else:
+        desc.append("• High quality, made with care")
+        desc.append("• Unique look that matches multiple styles")
+        desc.append("• Great as a gift or for everyday use")
+
+    if materials:
+        desc.append("")
+        desc.append(f"🧵 Materials: {clean_kw(materials)}")
+
+    if sizing:
+        desc.append("")
+        desc.append(f"📏 Size / Details: {clean_kw(sizing)}")
+
+    if personalization:
+        desc.append("")
+        desc.append(f"✨ Personalization: {clean_kw(personalization)}")
+
+    if shipping:
+        desc.append("")
+        desc.append(f"🚚 Shipping: {clean_kw(shipping)}")
+
+    if kws_line:
+        desc.append("")
+        desc.append(f"🔎 Keywords: {kws_line}")
+
+    desc.append("")
+    desc.append("📩 Questions? Message me anytime — I’m happy to help!")
+    return "\n".join(desc)
+
+# =========================
+# UI
+# =========================
+st.set_page_config(page_title=APP_TITLE, layout="centered")
+st.title(APP_TITLE)
+
+st.caption("Templates-only (No AI): better Titles + Tags + first 2 lines for Etsy search preview.")
+
+pro_users = load_pro_users()
+
+with st.sidebar:
+    st.subheader("Account")
+    email = st.text_input("Your email (required for Free/Pro)", placeholder="you@email.com").strip().lower()
+    pro_active = bool(email) and (email in pro_users)
+
+    if email and not is_valid_email(email):
+        st.warning("Please enter a valid email.")
+
+    st.markdown("---")
+    st.subheader("Plan")
+    if pro_active:
+        st.success("✅ Pro active (by email)")
+        st.write("Unlimited generations.")
+    else:
+        st.info("Free plan (daily limit)")
+        st.write(f"Free limit: **{FREE_DAILY_LIMIT} generations/day** per email.")
+        st.write("Upgrade to Pro (by email) after payment — manual activation.")
+
+# Block if no email
+if not email or not is_valid_email(email):
+    st.warning("Enter a valid email in the sidebar to use the generator.")
+    st.stop()
+
+# Usage gating (Free)
+usage = load_usage()
+used = get_free_used(usage, email)
+
+if (not pro_active) and used >= FREE_DAILY_LIMIT:
+    st.error("Free limit reached for today. Upgrade to Pro (by email) for unlimited generations.")
+    st.stop()
+
+# Inputs
+st.subheader("Listing inputs")
+col1, col2 = st.columns(2)
+with col1:
+    product = st.text_input("Product type", placeholder="e.g., Minimalist Necklace, Printable Wall Art, Leather Wallet")
+    material = st.text_input("Material", placeholder="e.g., 925 sterling silver, oak wood, leather")
+    style = st.text_input("Style", placeholder="e.g., minimalist, boho, modern, vintage")
+    color = st.text_input("Color (optional)", placeholder="e.g., gold, black, pastel")
+with col2:
+    audience = st.text_input("Target audience", placeholder="e.g., her, him, mom, dad, kids, couples")
+    occasion = st.text_input("Occasion", placeholder="e.g., birthday, wedding, anniversary, housewarming")
+    personalization = st.text_input("Personalization (optional)", placeholder="e.g., add name, custom text, choose size")
+
+keywords = st.text_input("Main keywords (comma-separated)", placeholder="e.g., dainty necklace, initial charm, gift for her")
+benefit = st.text_input("Main benefit (for first line)", placeholder="e.g., Elegant look + perfect everyday wear")
+season = st.selectbox("Seasonality", options=list(SEASONAL_PACKS.keys()), index=0)
+
+st.markdown("---")
+st.subheader("Description details (optional)")
+features = st.text_area("Key features (one per line)", placeholder="• Handmade\n• High quality finish\n• Gift-ready packaging", height=120)
+materials_desc = st.text_input("Materials text", placeholder="e.g., Sterling silver, hypoallergenic")
+sizing = st.text_input("Sizing / Details", placeholder="e.g., 16-18 inches chain, A4 size, 300 DPI")
+shipping = st.text_input("Shipping policy snippet", placeholder="e.g., Processing 1-2 days, tracked shipping available")
+
+# Generate button
+gen = st.button("🚀 Generate SEO Pack", use_container_width=True)
+
+if gen:
+    main_kws = split_keywords(keywords)
+
+    titles = title_variations(
+        product=product,
+        main_kws=main_kws,
+        material=material,
+        style=style,
+        audience=audience,
+        occasion=occasion,
+        personalization=personalization,
+        color=color,
+        season=season
+    )
+
+    long_tail = make_long_tail_tags(product, main_kws, material, style, audience, occasion, season)
+    buyer_intent = make_buyer_intent_tags(audience, occasion)
+    seasonal_tags = make_seasonality_tags(season)
+
+    desc = full_description(
+        product=product,
+        main_kws=main_kws,
+        benefit=benefit,
+        features=features,
+        materials=materials_desc,
+        sizing=sizing,
+        shipping=shipping,
+        personalization=personalization,
+        audience=audience,
+        occasion=occasion,
+        season=season
+    )
+
+    # increment usage for Free users only
+    if not pro_active:
+        inc_free_used(usage, email)
+        save_usage(usage)
+        used = get_free_used(usage, email)
+
+    st.success("✅ Generated")
+
+    # -------- Titles with counter + copy
+    st.subheader("1) Titles (with 140-char counter + Copy)")
+    if not titles:
+        st.warning("Add at least a Product type and/or Keywords to generate better titles.")
+    else:
+        for i, t in enumerate(titles, start=1):
+            n = len(t)
+            # status color
+            if n > MAX_TITLE_LEN:
+                st.error(f"Title {i} — {n}/{MAX_TITLE_LEN} (OVER limit)")
+            elif n >= 130:
+                st.warning(f"Title {i} — {n}/{MAX_TITLE_LEN} (close to limit)")
+            else:
+                st.caption(f"Title {i} — {n}/{MAX_TITLE_LEN}")
+
+            c1, c2 = st.columns([8, 2])
+            with c1:
+                st.text_area(
+                    label=f"Title {i}",
+                    value=t,
+                    height=68,
+                    key=f"title_area_{i}"
+                )
+            with c2:
+                copy_button(t, key=f"copy_title_{i}", label="Copy")
+
+            st.divider()
+
+    # -------- Tags improvements
+    st.subheader("2) Tags (Improved)")
+    tcol1, tcol2, tcol3 = st.columns(3)
+    with tcol1:
+        st.markdown("**Long-tail**")
+        st.write(long_tail if long_tail else ["(Add more keywords for better long-tail tags)"])
+    with tcol2:
+        st.markdown("**Buyer Intent**")
+        st.write(buyer_intent)
+    with tcol3:
+        st.markdown("**Seasonality**")
+        st.write(seasonal_tags if seasonal_tags else ["None"])
+
+    # One-click copy for tag packs
+    st.markdown("**Copy tag packs:**")
+    ctag1, ctag2, ctag3 = st.columns(3)
+    with ctag1:
+        copy_button(", ".join(long_tail), key="copy_longtail", label="Copy Long-tail")
+    with ctag2:
+        copy_button(", ".join(buyer_intent), key="copy_intent", label="Copy Intent")
+    with ctag3:
+        copy_button(", ".join(seasonal_tags), key="copy_season", label="Copy Seasonal")
+
+    # -------- Description first 2 lines emphasis
+    st.subheader("3) Description (First 2 lines optimized)")
+    lines = desc.splitlines()
+    if len(lines) >= 2:
+        st.markdown("**Etsy Search Preview (First 2 lines):**")
+        st.info(f"{lines[0]}\n\n{lines[1]}")
+    st.text_area("Full Description", value=desc, height=260)
+
+    copy_button(desc, key="copy_desc", label="Copy Description")
+
+    # -------- Free usage note
+    if not pro_active:
+        st.caption(f"Free usage today: {used}/{FREE_DAILY_LIMIT} generations")
+
+st.markdown("---")
+st.caption("Admin note: Add Pro emails in pro_users.json to activate Pro by email.")
