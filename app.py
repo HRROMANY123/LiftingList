@@ -11,7 +11,9 @@ import streamlit.components.v1 as components
 # =========================
 # CONFIG
 # =========================
-APP_TITLE = "Etsy SEO Helper (Templates Pro)"
+APP_TITLE = "Listing-Lift (Templates Pro)"
+STORE_URL = "https://listing-lift.lemonsqueezy.com/"
+
 PRO_USERS_FILE = "pro_users.json"
 USAGE_FILE = "usage_log.json"
 FREE_DAILY_LIMIT = 5
@@ -19,12 +21,12 @@ FREE_DAILY_LIMIT = 5
 MAX_TITLE_LEN = 140
 ETSY_TAG_MAX_LEN = 20
 
-# ✅ ضع رابط LemonSqueezy هنا (من Share داخل المنتج)
-# شكله بيكون: https://[STORE].lemonsqueezy.com/checkout/buy/[VARIANT_ID]
-LEMON_CHECKOUT_URL = "PUT_YOUR_LEMONSQUEEZY_CHECKOUT_LINK_HERE"
+# ✅ Optional: direct LemonSqueezy CHECKOUT link (Share from the product)
+# Example: https://[STORE].lemonsqueezy.com/checkout/buy/[VARIANT_ID]
+# If you don't have it, keep it empty and users can open the store page.
+LEMON_CHECKOUT_URL = ""  # leave empty if not available
 
-# بيانات التواصل (غيرها)
-SUPPORT_WHATSAPP = "+20XXXXXXXXXX"
+# Support (EMAIL ONLY) — WhatsApp removed
 SUPPORT_EMAIL = "support@yourdomain.com"
 
 # =========================
@@ -125,9 +127,6 @@ def copy_button(text: str, key: str, label="Copy"):
 
 # =========================
 # LemonSqueezy link builder (optional: prefill email)
-# Docs mention checkout link structure and prefilled fields. :contentReference[oaicite:4]{index=4}
-# We'll best-effort add "checkout[email]" if you want; if it doesn't prefill on your plan,
-# it's still OK: customer will type email manually.
 # =========================
 def build_lemon_link(base_url: str, email: str) -> str:
     base_url = (base_url or "").strip()
@@ -136,10 +135,8 @@ def build_lemon_link(base_url: str, email: str) -> str:
     if not email:
         return base_url
 
-    # Append query safely
     parsed = urllib.parse.urlparse(base_url)
     q = dict(urllib.parse.parse_qsl(parsed.query))
-    # best-effort prefill (commonly used pattern in hosted checkouts)
     q["checkout[email]"] = email
     new_query = urllib.parse.urlencode(q, doseq=True)
     return urllib.parse.urlunparse(parsed._replace(query=new_query))
@@ -434,7 +431,7 @@ def rank_titles(titles: list, product: str, main_kws: list, audience: str, occas
 # =========================
 st.set_page_config(page_title=APP_TITLE, layout="centered")
 st.title(APP_TITLE)
-st.caption("Sell-ready: onboarding + generator + upgrade with LemonSqueezy payment link.")
+st.caption(f"Upgrade link: {STORE_URL}")
 
 pro_users = load_pro_users()
 
@@ -454,7 +451,8 @@ with st.sidebar:
     else:
         st.info("Free plan (daily limit)")
         st.write(f"Free limit: **{FREE_DAILY_LIMIT} generations/day** per email.")
-        st.write("Upgrade to Pro via LemonSqueezy (manual activation).")
+        st.write("Upgrade to Pro via LemonSqueezy (manual activation by email).")
+        st.link_button("Open Listing-Lift Store", STORE_URL, use_container_width=True)
 
 if not email or not is_valid_email(email):
     st.warning("Enter a valid email in the sidebar to use the generator.")
@@ -464,6 +462,7 @@ usage = load_usage()
 used = get_free_used(usage, email)
 if (not pro_active) and used >= FREE_DAILY_LIMIT:
     st.error("Free limit reached for today. Upgrade to Pro for unlimited generations.")
+    st.link_button("Open Listing-Lift Store", STORE_URL, use_container_width=True)
     st.stop()
 
 tab_gen, tab_upgrade = st.tabs(["🚀 Generator", "💎 Upgrade / Pricing"])
@@ -581,13 +580,13 @@ with tab_gen:
 
         d1, d2, d3 = st.columns(3)
         with d1:
-            st.download_button("⬇️ Download JSON", data=json_bytes, file_name="etsy_seo_pack.json",
+            st.download_button("⬇️ Download JSON", data=json_bytes, file_name="listinglift_seo_pack.json",
                                mime="application/json", use_container_width=True)
         with d2:
-            st.download_button("⬇️ Download CSV", data=csv_bytes, file_name="etsy_seo_pack.csv",
+            st.download_button("⬇️ Download CSV", data=csv_bytes, file_name="listinglift_seo_pack.csv",
                                mime="text/csv", use_container_width=True)
         with d3:
-            st.download_button("⬇️ Download TXT", data=txt_bytes, file_name="etsy_seo_pack.txt",
+            st.download_button("⬇️ Download TXT", data=txt_bytes, file_name="listinglift_seo_pack.txt",
                                mime="text/plain", use_container_width=True)
 
         st.divider()
@@ -653,8 +652,11 @@ with tab_gen:
 # Upgrade / Pricing + LemonSqueezy link
 # =========================
 with tab_upgrade:
-    st.title("💎 Upgrade to Pro (via LemonSqueezy)")
-    st.write("Pay securely by card (EU/US customers) — then we activate Pro by your email.")
+    st.title("💎 Upgrade to Pro (Listing-Lift)")
+    st.write("Pay on LemonSqueezy — then we activate Pro by your email (manual).")
+
+    st.markdown("### Open the Store")
+    st.link_button("🛒 Open Listing-Lift Store", STORE_URL, use_container_width=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -662,32 +664,23 @@ with tab_upgrade:
         st.markdown(f"- {FREE_DAILY_LIMIT} generations/day\n- Copy titles/tags/description\n- Basic templates")
     with c2:
         st.markdown("### Pro")
-        st.markdown("- ✅ Unlimited generations\n- ✅ Copy ALL + Download (JSON/CSV/TXT)\n- ✅ Tag Guard (20 chars) + Best 13\n- ✅ Priority support")
+        st.markdown("- ✅ Unlimited generations\n- ✅ Copy ALL + Download (JSON/CSV/TXT)\n- ✅ Tag Guard (20 chars) + Best 13\n- ✅ Priority support (email)")
 
     st.markdown("---")
-    st.subheader("✅ Step 1: Pay with LemonSqueezy")
-
-    if not LEMON_CHECKOUT_URL or "PUT_YOUR_" in LEMON_CHECKOUT_URL:
-        st.error("You must set LEMON_CHECKOUT_URL in app.py (paste your checkout link from LemonSqueezy Share).")
-        st.caption("Where to get it: Dashboard → Product → Share → copy Checkout URL.")
-    else:
+    st.subheader("✅ Optional: Direct Checkout Link")
+    if LEMON_CHECKOUT_URL:
         pay_link = build_lemon_link(LEMON_CHECKOUT_URL, email)
-        st.link_button("💳 Pay Now (LemonSqueezy)", pay_link, use_container_width=True)
+        st.link_button("💳 Pay Now (LemonSqueezy Checkout)", pay_link, use_container_width=True)
+    else:
+        st.info("Direct checkout link not set. Users can buy from the store page above.")
 
-    st.subheader("✅ Step 2: Send your email for activation")
-    st.write("After payment, send the SAME email you used in checkout. We will activate Pro by email.")
+    st.subheader("✅ Activation (by Email)")
+    st.write("After payment, send the SAME email you used at checkout. We will activate Pro by your email.")
+    st.markdown("**Support email:**")
+    st.write(SUPPORT_EMAIL)
+    copy_button(SUPPORT_EMAIL, key="copy_support_email", label="Copy Support Email")
 
-    cc1, cc2 = st.columns(2)
-    with cc1:
-        st.markdown("**WhatsApp:**")
-        st.write(SUPPORT_WHATSAPP)
-        copy_button(SUPPORT_WHATSAPP, key="copy_wa", label="Copy WhatsApp")
-    with cc2:
-        st.markdown("**Email:**")
-        st.write(SUPPORT_EMAIL)
-        copy_button(SUPPORT_EMAIL, key="copy_support_email", label="Copy Support Email")
-
-    st.info("Activation method: we add your email to pro_users.json → Pro becomes active instantly.")
+    st.info("Admin note: Add the customer email to pro_users.json → Pro becomes active instantly.")
 
 st.markdown("---")
-st.caption("Admin note: Add Pro emails in pro_users.json to activate Pro by email.")
+st.caption("Listing-Lift • Pro activation by email (no WhatsApp).")
