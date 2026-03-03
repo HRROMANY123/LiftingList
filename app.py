@@ -1,4 +1,4 @@
-# app.py — Listing-Lift (FULL) : Titles + Tags + Description + Downloads + Tag Guard + AI Assist
+# app.py — Listing-Lift (FULL) : Titles + Tags + Description + Downloads + Tag Guard + Creative (NO AI)
 # Store: https://listing-lift.lemonsqueezy.com/
 # Support: hromany@hotmail.com
 
@@ -7,6 +7,8 @@ import json
 import re
 import csv
 import io
+import hashlib
+import random
 from datetime import date
 from pathlib import Path
 import urllib.parse
@@ -29,14 +31,8 @@ MAX_TITLE_LEN = 140
 ETSY_TAG_MAX_LEN = 20
 ETSY_TAG_COUNT = 13
 
-# Optional direct checkout link (/checkout/buy/...)
-LEMON_CHECKOUT_URL = ""
-
-# AI
-AI_MODEL = "gpt-4o-mini"
-AI_ENABLED_DEFAULT = True
-AI_MAX_OUTPUT_CHARS = 7000
-AI_FREE_DAILY_LIMIT = 1   # ✅ Free users can use AI Assist 1 time/day (Pro unlimited)
+# ✅ NO AI (as requested)
+AI_ENABLED_DEFAULT = False
 
 # =========================
 # EXAMPLE
@@ -73,13 +69,14 @@ FORM_KEYS = [
 def apply_example():
     for k, v in EXAMPLE_INPUT.items():
         st.session_state[k] = v
+    st.session_state["creative_regen"] = 0
     st.rerun()
 
 def reset_inputs():
-    # ✅ reliable reset
     for k in FORM_KEYS:
         st.session_state[k] = ""
     st.session_state["season"] = "None"
+    st.session_state["creative_regen"] = 0
     st.rerun()
 
 # =========================
@@ -142,18 +139,6 @@ def inc_free_used(usage: dict, email: str):
     usage.setdefault(tk, {})
     usage[tk][email] = int(usage[tk].get(email, 0)) + 1
 
-# AI usage counters (for Free AI limit)
-def get_ai_used(usage: dict, email: str) -> int:
-    email = (email or "").strip().lower()
-    return int(usage.get(today_key(), {}).get(f"ai::{email}", 0))
-
-def inc_ai_used(usage: dict, email: str):
-    email = (email or "").strip().lower()
-    tk = today_key()
-    usage.setdefault(tk, {})
-    key = f"ai::{email}"
-    usage[tk][key] = int(usage[tk].get(key, 0)) + 1
-
 # =========================
 # UI helpers
 # =========================
@@ -181,10 +166,6 @@ def build_lemon_link(base_url: str, email: str) -> str:
     q = dict(urllib.parse.parse_qsl(parsed.query))
     q["checkout[email]"] = email
     return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(q, doseq=True)))
-
-def clamp_text(s: str, max_chars: int) -> str:
-    s = s or ""
-    return s if len(s) <= max_chars else s[:max_chars] + "..."
 
 # =========================
 # Base SEO logic (no AI)
@@ -324,17 +305,144 @@ def strong_first_two_lines(product: str, main_kws: list[str], benefit: str, audi
     line2 = " • ".join(parts) if parts else "A thoughtful gift that feels premium and personal."
     return re.sub(r"\s+", " ", line1).strip(), re.sub(r"\s+", " ", line2).strip()
 
-def full_description(product: str, main_kws: list[str], benefit: str, features: str, materials: str,
-                     sizing: str, shipping: str, personalization: str, audience: str, occasion: str, season: str) -> str:
-    l1, l2 = strong_first_two_lines(product, main_kws, benefit, audience, occasion, personalization, season)
-    bullets = [clean_kw(x) for x in (features or "").split("\n") if clean_kw(x)][:8]
-    kws_line = ", ".join([k for k in main_kws[:8] if k])
+# =========================
+# Creative Description Engine (NO AI)
+# =========================
+DESC_HOOKS = [
+    "{product} that feels {vibe} and {premium}.",
+    "Add a touch of {vibe} to your day with this {product}.",
+    "A {vibe} {product} made for {audience_word} who love {style_word}.",
+    "Designed to stand out: {product} with a {vibe} finish.",
+    "A beautiful pick when you want something {vibe} but still {premium}.",
+]
 
-    desc = [l1, l2, "", "✅ Why you'll love it:"]
-    if bullets:
-        desc += [f"• {b}" for b in bullets]
-    else:
-        desc += ["• High quality, made with care", "• Unique look that matches multiple styles", "• Great as a gift or for everyday use"]
+DESC_VALUE_LINES = [
+    "Made to look amazing in photos and even better in real life.",
+    "Gift-ready and easy to love from the first unboxing.",
+    "Comfortable, wearable, and styled for everyday confidence.",
+    "A thoughtful choice when you want something simple but special.",
+    "A clean, modern look that fits many styles and occasions.",
+]
+
+DESC_CTA = [
+    "Send a message if you want help choosing the best option.",
+    "Need it as a gift? Leave a note and I’ll take care of the details.",
+    "Questions? I reply fast — feel free to message anytime.",
+    "Add to cart today and make it yours in minutes.",
+    "Want a small custom tweak? Message me before ordering.",
+]
+
+CATEGORY_PACKS = {
+    "jewelry": {
+        "vibes": ["minimal", "elegant", "dainty", "timeless", "modern"],
+        "premiums": ["premium", "high-quality", "giftable", "luxury-inspired"],
+        "default_bullets": [
+            "Lightweight and comfortable for everyday wear",
+            "Gift-ready packaging included",
+            "Timeless style that matches many outfits",
+            "A lovely choice for birthdays, anniversaries, and surprises",
+        ],
+    },
+    "home": {
+        "vibes": ["cozy", "warm", "modern", "boho", "minimal"],
+        "premiums": ["handcrafted", "high-quality", "statement", "giftable"],
+        "default_bullets": [
+            "Designed to elevate your space instantly",
+            "A thoughtful home gift for any occasion",
+            "Carefully made for a clean, lasting look",
+            "Packed safely for delivery",
+        ],
+    },
+    "digital": {
+        "vibes": ["clean", "professional", "simple", "modern", "minimal"],
+        "premiums": ["instant", "easy-to-use", "time-saving", "ready-to-print"],
+        "default_bullets": [
+            "Instant download — start using it right away",
+            "Simple and clean layout for easy editing",
+            "Perfect for saving time and staying organized",
+            "Works great for personal use or gifting",
+        ],
+    },
+    "default": {
+        "vibes": ["beautiful", "simple", "unique", "modern", "elegant"],
+        "premiums": ["high-quality", "giftable", "premium", "handmade"],
+        "default_bullets": [
+            "Made with care and attention to detail",
+            "A clean look that pairs well with many styles",
+            "Great gift option — simple, elegant, and easy to love",
+            "Ships safely and securely packaged",
+        ],
+    }
+}
+
+def guess_category(product: str) -> str:
+    p = normalize(product)
+    if any(w in p for w in ["necklace","ring","bracelet","earring","jewelry","pendant"]):
+        return "jewelry"
+    if any(w in p for w in ["poster","printable","template","digital","pdf","svg","planner","download"]):
+        return "digital"
+    if any(w in p for w in ["pillow","mug","sign","decor","candle","wall","home"]):
+        return "home"
+    return "default"
+
+def stable_seed(*parts: str) -> int:
+    raw = "||".join([p or "" for p in parts])
+    h = hashlib.md5(raw.encode("utf-8")).hexdigest()
+    return int(h[:8], 16)
+
+def creative_intro(product: str, audience: str, style: str, regen: int = 0) -> str:
+    cat = guess_category(product)
+    pack = CATEGORY_PACKS.get(cat, CATEGORY_PACKS["default"])
+    rng = random.Random(stable_seed(product, audience, style, f"intro::{regen}"))
+    vibe = rng.choice(pack["vibes"])
+    premium = rng.choice(pack["premiums"])
+    audience_word = clean_kw(audience) if audience else "anyone"
+    style_word = clean_kw(style) if style else "a clean look"
+    hook = rng.choice(DESC_HOOKS).format(
+        product=clean_kw(product) or "item",
+        vibe=vibe,
+        premium=premium,
+        audience_word=audience_word,
+        style_word=style_word,
+    )
+    val = rng.choice(DESC_VALUE_LINES)
+    return f"{hook} {val}"
+
+def creative_cta(product: str, occasion: str, regen: int = 0) -> str:
+    rng = random.Random(stable_seed(product, occasion, f"cta::{regen}"))
+    return rng.choice(DESC_CTA)
+
+def build_default_bullets(product: str, audience: str, occasion: str, regen: int = 0) -> list[str]:
+    cat = guess_category(product)
+    pack = CATEGORY_PACKS.get(cat, CATEGORY_PACKS["default"])
+    rng = random.Random(stable_seed(product, audience, occasion, f"bullets::{regen}"))
+    pool = pack["default_bullets"][:]
+    rng.shuffle(pool)
+    # pick 3
+    return pool[:3]
+
+def full_description(product: str, main_kws: list[str], benefit: str, features: str, materials: str,
+                     sizing: str, shipping: str, personalization: str, audience: str, occasion: str, season: str,
+                     style: str, regen: int = 0) -> str:
+    intro = creative_intro(product, audience, style, regen=regen)
+    l1, l2 = strong_first_two_lines(product, main_kws, benefit, audience, occasion, personalization, season)
+
+    bullets = [clean_kw(x) for x in (features or "").split("\n") if clean_kw(x)][:10]
+    if not bullets:
+        bullets = build_default_bullets(product, audience, occasion, regen=regen)
+
+    kws_line = ", ".join([k for k in main_kws[:10] if k])
+    cta = creative_cta(product, occasion, regen=regen)
+
+    desc = [
+        intro,
+        "",
+        l1,
+        l2,
+        "",
+        "✅ Why you'll love it:",
+        *[f"• {b}" for b in bullets],
+    ]
 
     if materials:
         desc += ["", f"🧵 Materials: {clean_kw(materials)}"]
@@ -346,7 +454,8 @@ def full_description(product: str, main_kws: list[str], benefit: str, features: 
         desc += ["", f"🚚 Shipping: {clean_kw(shipping)}"]
     if kws_line:
         desc += ["", f"🔎 Keywords: {kws_line}"]
-    desc += ["", "📩 Questions? Email support anytime — I’m happy to help!"]
+
+    desc += ["", cta, "", "📩 Questions? Email support anytime — I’m happy to help!"]
     return "\n".join(desc)
 
 # =========================
@@ -429,66 +538,13 @@ def tag_guard_fix(tags: list[str], required_count: int = ETSY_TAG_COUNT) -> dict
     return {"original": original, "fixed": fixed, "audit": {"count": len(fixed), "dups": dups, "too_long": too_long}}
 
 # =========================
-# AI ASSIST
-# =========================
-def get_openai_key() -> str:
-    try:
-        k = st.secrets.get("OPENAI_API_KEY", "")
-        if k:
-            return str(k)
-    except Exception:
-        pass
-    return os.environ.get("OPENAI_API_KEY", "")
-
-def ai_assist_suggest(payload: dict) -> dict:
-    api_key = get_openai_key()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set.")
-    try:
-        from openai import OpenAI
-    except Exception as e:
-        raise RuntimeError("Install 'openai>=1.0.0' in requirements.txt") from e
-
-    client = OpenAI(api_key=api_key)
-    user_text = json.dumps(payload, ensure_ascii=False)
-
-    instructions = (
-        "You are an Etsy listing assistant. Improve the user's listing inputs. "
-        "Return ONLY valid JSON with keys: "
-        "keywords (comma-separated), benefit (short), features (newline bullets), "
-        "audience, occasion, personalization, extra_tags (comma-separated). "
-        "No extra text outside JSON. Avoid trademarks."
-    )
-
-    resp = client.responses.create(
-        model=AI_MODEL,
-        instructions=instructions,
-        input=f"User listing data JSON:\n{user_text}"
-    )
-
-    text = getattr(resp, "output_text", "") or ""
-    text = clamp_text(text.strip(), AI_MAX_OUTPUT_CHARS)
-
-    m = re.search(r"\{.*\}", text, flags=re.S)
-    if not m:
-        raise RuntimeError("AI did not return JSON.")
-    data = json.loads(m.group(0))
-
-    return {
-        "keywords": clean_kw(str(data.get("keywords", ""))),
-        "benefit": clean_kw(str(data.get("benefit", ""))),
-        "features": str(data.get("features", "")).strip(),
-        "audience": clean_kw(str(data.get("audience", ""))),
-        "occasion": clean_kw(str(data.get("occasion", ""))),
-        "personalization": clean_kw(str(data.get("personalization", ""))),
-        "extra_tags": clean_kw(str(data.get("extra_tags", ""))),
-    }
-
-# =========================
 # UI
 # =========================
 st.set_page_config(page_title="Listing-Lift", page_icon="🚀", layout="centered")
 st.title(APP_TITLE)
+
+if "creative_regen" not in st.session_state:
+    st.session_state["creative_regen"] = 0
 
 top1, top2 = st.columns([2, 1])
 with top1:
@@ -512,11 +568,10 @@ with st.sidebar:
     st.subheader("Plan")
     if pro_active:
         st.success("✅ Pro active (by email)")
-        st.write("Unlimited generations + unlimited AI Assist.")
+        st.write("Unlimited generations.")
     else:
         st.info("Free plan")
         st.write(f"- {FREE_DAILY_LIMIT} generations/day")
-        st.write(f"- AI Assist: {AI_FREE_DAILY_LIMIT}/day")
         st.link_button("Open Listing-Lift Store", STORE_URL, use_container_width=True)
 
     st.markdown("---")
@@ -525,7 +580,7 @@ with st.sidebar:
     copy_button(SUPPORT_EMAIL, key="copy_support_email_sidebar", label="Copy Support Email")
 
 if not email_ok:
-    st.info("Enter your email in the sidebar to enable Generate / AI Assist.")
+    st.info("Enter your email in the sidebar to enable Generate.")
 
 tab_gen, tab_upgrade = st.tabs(["🚀 Generator", "💎 Upgrade / Pricing"])
 
@@ -535,13 +590,19 @@ tab_gen, tab_upgrade = st.tabs(["🚀 Generator", "💎 Upgrade / Pricing"])
 with tab_gen:
     st.subheader("Listing inputs")
 
-    b1, b2 = st.columns(2)
+    b1, b2, b3 = st.columns(3)
     with b1:
         if st.button("✨ Load Example", use_container_width=True):
             apply_example()
     with b2:
         if st.button("🔄 Reset", use_container_width=True):
             reset_inputs()
+    with b3:
+        # ✅ New: regen creative text without changing inputs
+        if st.button("🎲 Regenerate Creative Text", use_container_width=True):
+            st.session_state["creative_regen"] = int(st.session_state.get("creative_regen", 0)) + 1
+            st.success("Creative version changed ✅ (generate again)")
+            st.rerun()
 
     col1, col2 = st.columns(2)
     with col1:
@@ -564,64 +625,6 @@ with tab_gen:
     st.text_input("Materials text", key="materials_desc")
     st.text_input("Sizing / Details", key="sizing")
     st.text_input("Shipping policy snippet", key="shipping")
-
-    st.markdown("---")
-    st.subheader("✨ AI Assist (optional)")
-    ai_on = st.checkbox("Enable AI Assist", value=AI_ENABLED_DEFAULT)
-
-    if pro_active:
-        st.info("✅ Pro: Unlimited AI Assist")
-    else:
-        st.info(f"🆓 Free: AI Assist {AI_FREE_DAILY_LIMIT}/day")
-
-    ai_btn = st.button("✨ AI Assist: Improve Inputs", use_container_width=True, disabled=not ai_on)
-
-    if ai_btn:
-        if not email_ok:
-            st.error("Enter a valid email first.")
-            st.stop()
-
-        # Free AI daily limit
-        if not pro_active:
-            ai_used = get_ai_used(usage, email)
-            if ai_used >= AI_FREE_DAILY_LIMIT:
-                st.error(f"AI Assist Free limit reached today ({AI_FREE_DAILY_LIMIT}/day). Upgrade to Pro for unlimited.")
-                st.link_button("🛒 Upgrade to Pro", STORE_URL, use_container_width=True)
-                st.stop()
-
-        payload = {k: st.session_state.get(k, "") for k in FORM_KEYS}
-        payload["season"] = st.session_state.get("season", "None")
-
-        with st.spinner("AI Assist working..."):
-            try:
-                sug = ai_assist_suggest(payload)
-            except Exception as e:
-                st.error(f"AI Assist failed: {e}")
-                st.stop()
-
-        # Apply suggestions (only overwrite if AI returned non-empty)
-        if sug.get("keywords"):
-            st.session_state["keywords"] = sug["keywords"]
-        if sug.get("benefit"):
-            st.session_state["benefit"] = sug["benefit"]
-        if sug.get("features"):
-            st.session_state["features"] = sug["features"]
-        if sug.get("audience"):
-            st.session_state["audience"] = sug["audience"]
-        if sug.get("occasion"):
-            st.session_state["occasion"] = sug["occasion"]
-        if sug.get("personalization"):
-            st.session_state["personalization"] = sug["personalization"]
-        if sug.get("extra_tags"):
-            st.session_state["paste_tags"] = sug["extra_tags"]
-
-        # Count AI usage for Free users
-        if not pro_active:
-            inc_ai_used(usage, email)
-            save_usage(usage)
-
-        st.success("AI Assist applied ✅ (inputs updated)")
-        st.rerun()
 
     st.markdown("---")
     st.subheader("Tag Guard (optional)")
@@ -659,6 +662,7 @@ with tab_gen:
         sizing = st.session_state.get("sizing", "")
         shipping = st.session_state.get("shipping", "")
         paste_tags = st.session_state.get("paste_tags", "")
+        regen = int(st.session_state.get("creative_regen", 0))
 
         main_kws = split_keywords(keywords)
 
@@ -685,9 +689,11 @@ with tab_gen:
         if str(paste_tags).strip():
             pasted_fix = tag_guard_fix(parse_tags(paste_tags), required_count=ETSY_TAG_COUNT)
 
-        # Description
-        desc = full_description(product, main_kws, benefit, features, materials_desc, sizing, shipping,
-                                personalization, audience, occasion, season)
+        # ✅ Creative Description (varied, no AI)
+        desc = full_description(
+            product, main_kws, benefit, features, materials_desc, sizing, shipping,
+            personalization, audience, occasion, season, style=style, regen=regen
+        )
 
         # Count free generation usage
         if not pro_active:
@@ -699,7 +705,6 @@ with tab_gen:
 
         st.success("✅ Generated")
 
-        # Quick copy payload
         payload_all = (
             f"BEST TITLE:\n{best_title}\n\n"
             f"BEST 13 TAGS:\n{', '.join(best_tags)}\n\n"
@@ -776,6 +781,7 @@ with tab_gen:
             "ranked_titles": ranked,
             "best_13_tags": best_tags,
             "description": desc,
+            "creative_version": regen,
             "meta": {
                 "product": product,
                 "material": material,
@@ -797,6 +803,7 @@ with tab_gen:
         writer.writerow(["BEST", "Best Title", best_title])
         writer.writerow(["BEST", "Best 13 Tags", ", ".join(best_tags)])
         writer.writerow(["BEST", "Description", desc])
+        writer.writerow(["BEST", "Creative Version", str(regen)])
         writer.writerow([])
         writer.writerow(["RANKED_TITLES", "Title", "Score"])
         for x in ranked:
@@ -826,17 +833,17 @@ with tab_gen:
 # =========================
 with tab_upgrade:
     st.title("💎 Upgrade to Pro (Listing-Lift)")
-    st.write("Buy from LemonSqueezy — Pro gives unlimited generations + unlimited AI Assist.")
+    st.write("Buy from LemonSqueezy — Pro gives unlimited generations.")
     st.link_button("🛒 Open Listing-Lift Store", STORE_URL, use_container_width=True)
 
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("### Free")
-        st.markdown(f"- {FREE_DAILY_LIMIT} generations/day\n- AI Assist: {AI_FREE_DAILY_LIMIT}/day\n- Downloads")
+        st.markdown(f"- {FREE_DAILY_LIMIT} generations/day\n- Downloads")
     with c2:
         st.markdown("### Pro")
-        st.markdown("- ✅ Unlimited generations\n- ✅ Unlimited AI Assist\n- ✅ Downloads JSON/CSV/TXT\n- ✅ Support by email")
+        st.markdown("- ✅ Unlimited generations\n- ✅ Downloads JSON/CSV/TXT\n- ✅ Support by email")
 
     st.markdown("---")
     st.subheader("Support")
